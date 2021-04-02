@@ -3,14 +3,20 @@
 #include <TFT_eSPI.h>
 #include <Wire.h>
 #include <SPIFFS.h>
-#include <PN532_I2C.h>
-#include <PN532.h>
-#include <NfcAdapter.h>
+//#include <PN532_I2C.h>
+//#include <PN532.h>
+//#include <NfcAdapter.h>
+#include <Adafruit_PN532.h>
+
+#define PN532_PIN_IRQ 16
+#define PN532_PIN_RESET 17
 
 #define LVGL_TICK_PERIOD 60
-PN532_I2C pn532_i2c(Wire);
-NfcAdapter nfc = NfcAdapter(pn532_i2c);
+//PN532_I2C pn532_i2c(Wire);
+//NfcAdapter nfc = NfcAdapter(pn532_i2c);
 //PN532 nfc(pn532_i2c);
+
+Adafruit_PN532 nfc(PN532_PIN_IRQ, PN532_PIN_RESET);
 
 //Ticker tick; /* timer for interrupt handler */
 TFT_eSPI tft = TFT_eSPI(); /* TFT instance */
@@ -141,6 +147,13 @@ static lv_obj_t *lblDate;
 static lv_obj_t *barBattery;
 static lv_obj_t *lblBattery;
 
+//NFC Variable
+const int DELAY_BETWEEN_CARDS = 1500;
+long timeLastCardRead = 0;
+boolean readerDisabled = false;
+int irqCurr;
+int irqPrev;
+
 lv_obj_t * slider_label;
 int screenWidth = 480;
 int screenHeight = 320;
@@ -267,16 +280,6 @@ bool initSPIFFS(){
 	return true;
 }
 
-void Task_NFC(lv_task_t *task){
-  uint32_t *user_data = (uint32_t*)task->user_data;
-
-  if(nfc.tagPresent()){
-	  Serial.println("ada kartu");
-	  NfcTag tag = nfc.read();
-	  tag.print();
-  }
-}
-
 void Task_Clock(lv_task_t *task){
 	static uint8_t hour, minute, second;
 	static char secondBuf[3], minuteBuf[3], hourBuf[3];
@@ -312,6 +315,68 @@ void Task_Clock(lv_task_t *task){
 	
 }
 
+void handleCardDetected() {
+    uint8_t success = false;
+    uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
+    uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
+
+    // read the NFC tag's info
+    success = nfc.readDetectedPassiveTargetID(uid, &uidLength);
+    Serial.println(success ? "Read successful" : "Read failed (not a card?)");
+
+    if (success) {
+      // Display some basic information about the card
+      Serial.println("Found an ISO14443A card");
+      Serial.print("  UID Length: ");Serial.print(uidLength, DEC);Serial.println(" bytes");
+      Serial.print("  UID Value: ");
+      nfc.PrintHex(uid, uidLength);
+      
+      if (uidLength == 4)
+      {
+        // We probably have a Mifare Classic card ... 
+        uint32_t cardid = uid[0];
+        cardid <<= 8;
+        cardid |= uid[1];
+        cardid <<= 8;
+        cardid |= uid[2];  
+        cardid <<= 8;
+        cardid |= uid[3]; 
+        Serial.print("Seems to be a Mifare Classic card #");
+        Serial.println(cardid);
+      }
+      Serial.println("");
+
+      timeLastCardRead = millis();
+    }
+
+    // The reader will be enabled again after DELAY_BETWEEN_CARDS ms will pass.
+    readerDisabled = true;
+}
+
+void startListeningToNFC() {
+  // Reset our IRQ indicators
+  irqPrev = irqCurr = HIGH;
+  
+  Serial.println("Waiting for an ISO14443A Card ...");
+  nfc.startPassiveTargetIDDetection(PN532_MIFARE_ISO14443A);
+}
+
+void init_nfc(){
+	nfc.begin();
+
+	uint32_t versiondata = nfc.getFirmwareVersion();
+	if(!versiondata){
+		Serial.print("Didn't find PN532x board");
+	}
+
+	Serial.print("Found chip PN5"); Serial.println((versiondata>>24) & 0xFF, HEX); 
+  	Serial.print("Firmware ver. "); Serial.print((versiondata>>16) & 0xFF, DEC); 
+  	Serial.print('.'); Serial.println((versiondata>>8) & 0xFF, DEC);
+
+	nfc.SAMConfig();
+
+	startListeningToNFC();
+}
 void setup() {
   ledcSetup(10, 5000/*freq*/, 12 /*resolution*/);
   ledcAttachPin(32, 10);
@@ -321,7 +386,6 @@ void setup() {
   Serial.begin(115200); /* prepare for possible serial debug */
 
   Serial.println("Init nfc...");
-  nfc.begin();
 
   lv_init();
 
@@ -372,6 +436,23 @@ void setup() {
 
 void loop() {
   lv_task_handler(); /* let the GUI do its work */
+   if (readerDisabled) {
+    if (millis() - timeLastCardRead > DELAY_BETWEEN_CARDS) {
+      readerDisabled = false;
+      startListeningToNFC();
+    }
+  } else {
+    irqCurr = digitalRead(PN532_PIN_IRQ);
+
+    // When the IRQ is pulled low - the reader has got something for us.
+    if (irqCurr == LOW && irqPrev == HIGH) {
+       Serial.println("Got NFC IRQ");  
+       handleCardDetected(); 
+    }
+  
+    irqPrev = irqCurr;
+  }
+
   delay(5);
 
   /*if(statusScreen == 1){
