@@ -3,18 +3,31 @@
 #include <TFT_eSPI.h>
 #include <Wire.h>
 #include <SPIFFS.h>
+#include <SPI.h>
+#include <SD.h>
+#include <FS.h>
 //#include <PN532_I2C.h>
 //#include <PN532.h>
 //#include <NfcAdapter.h>
+#include <lv_lib_png/lv_png.h>
 #include <Adafruit_PN532.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
 
 #define PN532_PIN_IRQ 16
 #define PN532_PIN_RESET 17
+
+#define BUZZER_PIN 33
+
+#define SD_CS 5
 
 #define LVGL_TICK_PERIOD 60
 //PN532_I2C pn532_i2c(Wire);
 //NfcAdapter nfc = NfcAdapter(pn532_i2c);
 //PN532 nfc(pn532_i2c);
+
+#define BUZZER_PWMCHANNEL 0
+#define LCD_PWMCHANNEL 10
 
 Adafruit_PN532 nfc(PN532_PIN_IRQ, PN532_PIN_RESET);
 
@@ -158,7 +171,14 @@ lv_obj_t * slider_label;
 int screenWidth = 480;
 int screenHeight = 320;
 uint8_t statusScreen = 0;
-  
+
+uint8_t stateScreen = 0;
+
+uint8_t buzzerState = 0;
+
+static lv_obj_t *img_test;
+static lv_obj_t *imgLogin;
+
 #if USE_LV_LOG != 0
 /* Serial debugging */
 void my_print(lv_log_level_t level, const char * file, uint32_t line, const char * dsc)
@@ -277,6 +297,7 @@ bool initSPIFFS(){
 	if(!SPIFFS.begin(true)){
 		return false;
 	}
+	
 	return true;
 }
 
@@ -377,17 +398,56 @@ void init_nfc(){
 
 	startListeningToNFC();
 }
+
 void setup() {
-  ledcSetup(10, 5000/*freq*/, 12 /*resolution*/);
-  ledcAttachPin(32, 10);
+  ledcSetup(LCD_PWMCHANNEL, 5000/*freq*/, 12 /*resolution*/);
+  ledcAttachPin(32, LCD_PWMCHANNEL);
   analogReadResolution(12);
-  ledcWrite(10, 819);
+  ledcWrite(LCD_PWMCHANNEL, 819);
 
   Serial.begin(115200); /* prepare for possible serial debug */
 
-  Serial.println("Init nfc...");
-
   lv_init();
+
+  if(!SD.begin(SD_CS)){
+	  Serial.println("Gagal memuat kartu SD");
+	  return;
+  }
+  uint8_t cardType = SD.cardType();
+  if(cardType == CARD_NONE) {
+	  Serial.println("Tidak ada kartu SD");
+	  return;
+  }
+
+  lv_fs_if_init();
+  lv_png_init();
+  
+lv_fs_dir_t dir;
+lv_fs_res_t res;
+res = lv_fs_dir_open(&dir, "S:/");
+if(res != LV_FS_RES_OK) {
+	Serial.println("Gagal 1!");
+	while(1);
+}
+
+char fn[256];
+while(1) {
+    res = lv_fs_dir_read(&dir, fn);
+    if(res != LV_FS_RES_OK) {
+        Serial.println("Gagal 2");
+        break;
+    }
+
+    /*fn is empty, if not more files to read*/
+    if(strlen(fn) == 0) {
+        break;
+    }
+
+    //printf("%s\n", fn);
+	Serial.println(fn);
+}
+
+lv_fs_dir_close(&dir);
 
   #if USE_LV_LOG != 0
     lv_log_register_print_cb(my_print); /* register print function for debugging */
@@ -428,10 +488,35 @@ void setup() {
   //lv_obj_set_size(tv, lv_disp_get_hor_res(NULL), lv_disp_get_ver_res(NULL));
   static uint32_t user_data = 10;
   lv_task_t * task = lv_task_create(Task_Clock, 1000, LV_TASK_PRIO_MID, &user_data);
+
+  Serial.println("Init nfc...");
+  init_nfc();
   Serial.println("Mulai...");
+
+  //img_test = lv_img_create(lv_scr_act(), NULL);
+  //lv_img_set_src(img_test, "S:/test.bin");
+  //lv_obj_align(img_test, NULL, LV_ALIGN_CENTER, 0, 0);
+
+  //ledcSetup(BUZZER_PWMCHANNEL, 5000, 8);
+  //ledcAttachPin(BUZZER_PIN, BUZZER_PWMCHANNEL);
+  //ledcDetachPin(BUZZER_PIN);
 
   LoginScreen_2();
 
+}
+
+void taskBuzzer(lv_task_t *task){
+	uint32_t *user_data = (uint32_t*)task->user_data;
+
+	if(buzzerState == 1){
+		ledcWrite(BUZZER_PWMCHANNEL, 200);
+		delay(50);
+		ledcWrite(BUZZER_PWMCHANNEL, 0);
+	} else if(buzzerState == 2){
+		ledcWrite(BUZZER_PWMCHANNEL, 200);
+		delay(50);
+		ledcWrite(BUZZER_PWMCHANNEL, 0);
+	}
 }
 
 void loop() {
@@ -448,6 +533,10 @@ void loop() {
     if (irqCurr == LOW && irqPrev == HIGH) {
        Serial.println("Got NFC IRQ");  
        handleCardDetected(); 
+	   if(stateScreen == 0) {
+		   stateScreen = 1;
+		   MenuScreen();
+	   }
     }
   
     irqPrev = irqCurr;
@@ -514,13 +603,13 @@ void showObjMain() {
 	bckMain = lv_obj_create(lv_scr_act(), NULL);
 	lv_obj_add_style(bckMain, LV_STATE_DEFAULT, &styleMenu);
 	lv_obj_set_pos(bckMain, 0, 30);
-	lv_obj_set_height(bckMain, 320 - lv_obj_get_height(bckTop) - 40);
+	lv_obj_set_height(bckMain, 320 - lv_obj_get_height(bckTop) - lv_obj_get_height(bckBottom));
 	lv_obj_set_width(bckMain, 480);
 }
 void showObjBottom() {
 	bckBottom = lv_obj_create(lv_scr_act(), NULL);
 	lv_obj_set_pos(bckBottom, 0, 280);
-	lv_obj_set_size(bckBottom, 480, 40);
+	lv_obj_set_size(bckBottom, 480, 30);
 
 	btnBack = lv_btn_create(bckBottom, NULL);
 	lv_obj_set_event_cb(btnBack, NavButton_cb);
@@ -536,7 +625,6 @@ static void NavButton_cb(lv_obj_t* obj, lv_event_t event) {
 		MenuScreen();
 	}
 }
-
 
 static void Menu_cb(lv_obj_t* obj, lv_event_t event) {
 	if (event == LV_EVENT_VALUE_CHANGED && obj == btnMenus) {
@@ -630,6 +718,7 @@ static void Logout_cb(lv_obj_t* obj, lv_event_t event) {
 	if (event == LV_EVENT_VALUE_CHANGED) {
 		if (lv_msgbox_get_active_btn(obj) == 0) {
 			lv_obj_del(obj);
+			stateScreen = 0;
 			LoginScreen_2();
 		}
 		else {
@@ -646,6 +735,7 @@ static void Settings_cb(lv_obj_t* obj, lv_event_t event) {
 		snprintf(buf, 4, "%u", val);
 		lv_label_set_text(lblValBrightness, buf);
 	}
+
 	else if (obj == sliderBuzzer && event == LV_EVENT_VALUE_CHANGED) {
 		int16_t val = lv_slider_get_value(obj);
 		printf("Value Buzzer: %d\n", val);
@@ -653,6 +743,7 @@ static void Settings_cb(lv_obj_t* obj, lv_event_t event) {
 		snprintf(buf, 4, "%u", val);
 		lv_label_set_text(lblValBuzzer, buf);
 	}
+
 	else if (obj == btnCheckID && event == LV_EVENT_VALUE_CHANGED) {
 		const char* btnClose[] = {"OK", "Close", ""};
 		msgboxCheckID = lv_msgbox_create(bckMain, NULL);
@@ -801,6 +892,14 @@ void LoginScreen_2() {
 	lv_label_set_align(lblLogin, LV_LABEL_ALIGN_AUTO);
 	lv_obj_align(lblLogin, NULL, LV_ALIGN_CENTER, 0, 0);
 	statusScreen = 1;
+
+	//img_test = lv_img_create(lv_scr_act(), NULL);
+ 	//lv_img_set_src(img_test, "S:/test.bin");
+ 	//lv_obj_align(img_test, NULL, LV_ALIGN_CENTER, 0, 0);
+
+	//imgLogin = lv_img_create(lv_scr_act(), NULL);
+	//lv_img_set_src(imgLogin, "S:/iconLogin.bin");
+	//lv_obj_align(imgLogin, NULL, LV_ALIGN_CENTER, 0, 0);
 
 	lv_obj_del(btnBack);
 }
